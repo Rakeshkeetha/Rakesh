@@ -408,3 +408,284 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
   ENDMETHOD.
 
 ENDCLASS.
+
+
+
+CLASS zcl_http_client_demo IMPLEMENTATION.
+
+  METHOD determine_method.
+    IF     p_get = abap_true.  r_method = if_http_request=>co_request_method_get.     RETURN. ENDIF.
+    IF    p_post = abap_true.  r_method = if_http_request=>co_request_method_post.    RETURN. ENDIF.
+    IF     p_put = abap_true.  r_method = if_http_request=>co_request_method_put.     RETURN. ENDIF.
+    IF     p_pat = abap_true.  r_method = 'PATCH'.                                    RETURN. ENDIF. " older releases
+    IF     p_del = abap_true.  r_method = if_http_request=>co_request_method_delete.  RETURN. ENDIF.
+    r_method = if_http_request=>co_request_method_get. " default
+  ENDMETHOD.
+
+  METHOD parse_headers_text.
+    DATA lt_split TYPE ty_string_tab.
+    SPLIT i_hdrs_text AT ';' INTO TABLE lt_split.
+    LOOP AT lt_split ASSIGNING FIELD-SYMBOL(<l>).
+      DATA(l) = |{ <l> ALPHA = OFF }|.
+      CONDENSE l NO-GAPS.
+      REPLACE ALL OCCURRENCES OF ':' IN l WITH ': '.
+      REPLACE ALL OCCURRENCES OF ':  ' IN l WITH ': '.
+      IF l IS NOT INITIAL.
+        APPEND l TO ct_hdrs.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD maybe_build_basic_auth.
+    IF i_on <> abap_true OR i_user IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lv_has_auth) = abap_false.
+    LOOP AT ct_hdrs ASSIGNING FIELD-SYMBOL(<h>).
+      IF <h> CP 'Authorization:*' OR <h> CP 'authorization:*'.
+        lv_has_auth = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_has_auth = abap_false.
+      DATA(lv_cred)   = |{ i_user }:{ i_pass }|.
+      DATA(lv_base64) TYPE string.
+      CALL FUNCTION 'SCMS_BASE64_ENCODE_STR'
+        EXPORTING input  = lv_cred
+        IMPORTING output = lv_base64.
+      APPEND |Authorization: Basic { lv_base64 }| TO ct_hdrs.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD read_body_from_file.
+    DATA lt_bin TYPE solix_tab.
+    DATA lv_xstr TYPE xstring.
+
+    TRY.
+        cl_gui_frontend_services=>gui_upload(
+          EXPORTING filename = i_filename
+                    filetype = 'BIN'
+          CHANGING  data_tab = lt_bin
+        ).
+
+        CALL FUNCTION 'SCMS_BINARY_TO_XSTRING'
+          EXPORTING input_length = lines( lt_bin ) * 255
+          IMPORTING buffer       = lv_xstr
+          TABLES    binary_tab   = lt_bin.
+
+        " Assume UTF-8; adjust if you know the file encoding
+        DATA(lo_in) = cl_abap_conv_in_ce=>create( input = lv_xstr encoding = 'UTF-8' ).
+        lo_in->read( IMPORTING data = r_body ).
+      CATCH cx_root INTO DATA(lx).
+        RAISE EXCEPTION TYPE cx_static_check
+          EXPORTING textid = cx_static_check=>others
+                    previous = lx.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD save_to_file.
+    DATA lv_xstr TYPE xstring.
+    DATA lt_bin  TYPE solix_tab.
+
+    TRY.
+        DATA(lo_out) = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
+        lo_out->write( data = i_content ).
+        lv_xstr = lo_out->get_buffer( ).
+
+        CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+          EXPORTING buffer     = lv_xstr
+          TABLES    binary_tab = lt_bin.
+
+        cl_gui_frontend_services=>gui_download(
+          EXPORTING filename = i_filename
+                    filetype = 'BIN'
+          CHANGING  data_tab = lt_bin
+        ).
+      CATCH cx_root INTO DATA(lx).
+        RAISE EXCEPTION TYPE cx_static_check
+          EXPORTING textid = cx_static_check=>others
+                    previous = lx.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD call_service.
+    DATA lo_client TYPE REF TO if_http_client.
+
+    " Create client
+    TRY.
+        cl_http_client=>create_by_url(
+          EXPORTING url    = i_url
+          IMPORTING client = lo_client
+        ).
+      CATCH cx_root INTO DATA(lx1).
+        RAISE EXCEPTION TYPE cx_static_check
+          EXPORTING textid  = cx_static_check=>others
+                    previous = lx1.
+    ENDTRY.
+
+    " Method
+    lo_client->request->set_method( i_method ).
+
+    " Apply headers and detect Content-Type
+    DATA(lv_content_set) = abap_false.
+    LOOP AT it_request_hdr ASSIGNING FIELD-SYMBOL(<hline>).
+      DATA(lv_name)  = <hline>.
+      DATA(lv_value) = ``.
+      FIND FIRST OCCURRENCE OF ':' IN lv_name MATCH OFFSET DATA(lv_idx).
+      IF sy-subrc = 0.
+        lv_value = lv_name+lv_idx+1.
+        lv_name  = lv_name( lv_idx ).
+        SHIFT lv_value LEFT  DELETING LEADING space.
+        SHIFT lv_name  RIGHT DELETING TRAILING space.
+        TRANSLATE lv_name TO UPPER CASE.
+
+        lo_client->request->set_header_field(
+          name  = lv_name
+          value = lv_value
+        ).
+
+        IF lv_name = 'CONTENT-TYPE'.
+          lv_content_set = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_content_set = abap_false AND i_content_type IS NOT INITIAL.
+      lo_client->request->set_header_field(
+        name  = 'Content-Type'
+        value = i_content_type
+      ).
+    ENDIF.
+
+    " Body
+    IF i_body IS NOT INITIAL.
+      lo_client->request->set_cdata( i_body ).
+    ENDIF.
+
+    " Send & receive
+    TRY.
+        lo_client->send( ).
+        lo_client->receive( ).
+      CATCH cx_root INTO DATA(lx2).
+        lo_client->close( ).
+        RAISE EXCEPTION TYPE cx_static_check
+          EXPORTING textid  = cx_static_check=>others
+                    previous = lx2.
+    ENDTRY.
+
+    " Status
+    lo_client->response->get_status(
+      IMPORTING code   = e_status_code
+                reason = e_status_text
+    ).
+
+    " Headers
+    DATA lt_nvp TYPE tihttpnvp.
+    lt_nvp = lo_client->response->get_header_fields( ).
+    CLEAR et_resp_hdrs.
+    LOOP AT lt_nvp ASSIGNING FIELD-SYMBOL(<nvp>).
+      APPEND VALUE ty_header( name = <nvp>-name value = <nvp>-value ) TO et_resp_hdrs.
+    ENDLOOP.
+
+    " Body
+    e_resp_body = lo_client->response->get_cdata( ).
+
+    lo_client->close( ).
+  ENDMETHOD.
+
+  METHOD execute.
+    DATA: lt_hdr_lines TYPE ty_string_tab,
+          lv_body      TYPE string.
+
+    " Collect headers (from text and/or provided table)
+    IF i_request-headers_text IS NOT INITIAL.
+      parse_headers_text(
+        EXPORTING i_hdrs_text = i_request-headers_text
+        CHANGING  ct_hdrs     = lt_hdr_lines
+      ).
+    ENDIF.
+
+    IF i_request-headers_tab IS NOT INITIAL.
+      APPEND LINES OF i_request-headers_tab TO lt_hdr_lines.
+    ENDIF.
+
+    " Optional Basic Auth
+    maybe_build_basic_auth(
+      EXPORTING i_on   = i_request-basic_auth_on
+                i_user = i_request-basic_user
+                i_pass = i_request-basic_pass
+      CHANGING  ct_hdrs = lt_hdr_lines
+    ).
+
+    " Determine body (file overrides inline)
+    lv_body = i_request-body_inline.
+    IF i_request-body_file IS NOT INITIAL.
+      lv_body = read_body_from_file( i_request-body_file ).
+    ENDIF.
+
+    " Call
+    DATA: lv_code TYPE i,
+          lv_text TYPE string,
+          lt_rhdr TYPE ty_header_tab,
+          lv_rbd  TYPE string.
+
+    call_service(
+      EXPORTING
+        i_url          = i_request-url
+        i_method       = i_request-method
+        it_request_hdr = lt_hdr_lines
+        i_content_type = i_request-content_type
+        i_body         = lv_body
+      IMPORTING
+        e_status_code  = lv_code
+        e_status_text  = lv_text
+        et_resp_hdrs   = lt_rhdr
+        e_resp_body    = lv_rbd
+    ).
+
+    " Optional save
+    IF i_request-save_to_file = abap_true AND i_request-out_file IS NOT INITIAL.
+      save_to_file(
+        i_filename = i_request-out_file
+        i_content  = lv_rbd
+      ).
+    ENDIF.
+
+    r_response = VALUE ty_response(
+      status_code = lv_code
+      status_text = lv_text
+      headers     = lt_rhdr
+      body        = lv_rbd
+    ).
+  ENDMETHOD.
+
+  METHOD run_from_params.
+    DATA(lv_method) = determine_method(
+      p_get  = p_get
+      p_post = p_post
+      p_put  = p_put
+      p_pat  = p_pat
+      p_del  = p_del
+    ).
+
+    DATA(ls_req) = VALUE ty_request(
+      url           = p_url
+      method        = lv_method
+      content_type  = p_ctyp
+      headers_text  = p_hdrs
+      body_inline   = p_body
+      body_file     = p_bfile
+      basic_auth_on = p_bauth
+      basic_user    = p_user
+      basic_pass    = p_pass
+      save_to_file  = p_save
+      out_file      = p_ofile
+    ).
+
+    r_response = execute( ls_req ).
+  ENDMETHOD.
+
+ENDCLASS.
+
