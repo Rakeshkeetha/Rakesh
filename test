@@ -689,3 +689,96 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
 
 ENDCLASS.
 
+
+REPORT z_http_client_demo.
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE text-t01.
+PARAMETERS: p_url  TYPE string LOWER CASE OBLIGATORY.
+PARAMETERS: p_get  RADIOBUTTON GROUP m1 DEFAULT 'X',
+            p_post RADIOBUTTON GROUP m1,
+            p_put  RADIOBUTTON GROUP m1,
+            p_pat  RADIOBUTTON GROUP m1,
+            p_del  RADIOBUTTON GROUP m1.
+PARAMETERS: p_ctyp TYPE string LOWER CASE DEFAULT 'application/json'.
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE text-t02.
+PARAMETERS: p_hdrs TYPE string LOWER CASE.
+PARAMETERS: p_bauth AS CHECKBOX DEFAULT ' '.
+PARAMETERS: p_user TYPE string LOWER CASE,
+            p_pass TYPE string LOWER CASE.
+SELECTION-SCREEN END OF BLOCK b2.
+
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-t03.
+PARAMETERS: p_body  TYPE string LOWER CASE.
+PARAMETERS: p_bfile TYPE rlgrap-filename LOWER CASE.
+SELECTION-SCREEN END OF BLOCK b3.
+
+SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE text-t04.
+PARAMETERS: p_save AS CHECKBOX DEFAULT ' ',
+            p_ofile TYPE rlgrap-filename LOWER CASE.
+SELECTION-SCREEN END OF BLOCK b4.
+
+TEXT-t01 = 'Request'.
+TEXT-t02 = 'Headers / Auth'.
+TEXT-t03 = 'Body'.
+TEXT-t04 = 'Output'.
+
+START-OF-SELECTION.
+  DATA(lo) = NEW zcl_http_client_demo( ).
+  TRY.
+      DATA(ls_resp) = lo->run_from_params(
+        p_url   = p_url
+        p_get   = p_get
+        p_post  = p_post
+        p_put   = p_put
+        p_pat   = p_pat
+        p_del   = p_del
+        p_ctyp  = p_ctyp
+        p_hdrs  = p_hdrs
+        p_bauth = p_bauth
+        p_user  = p_user
+        p_pass  = p_pass
+        p_body  = p_body
+        p_bfile = p_bfile
+        p_save  = p_save
+        p_ofile = p_ofile
+      ).
+
+      " Print status
+      WRITE: / 'Status:', ls_resp-status_code, ls_resp-status_text.
+
+      " Headers
+      ULINE.
+      WRITE: / 'Response Headers:'.
+      LOOP AT ls_resp-headers ASSIGNING FIELD-SYMBOL(<h>).
+        WRITE: / <h>-name, ': ', <h>-value.
+      ENDLOOP.
+
+      " Body (first ~10 lines)
+      ULINE.
+      WRITE: / 'Response Body:'.
+      IF ls_resp-body IS INITIAL.
+        WRITE: / '(empty)'.
+      ELSE.
+        DATA(lt_lines) = VALUE zcl_http_client_demo=>ty_string_tab( ).
+        SPLIT ls_resp-body AT cl_abap_char_utilities=>newline INTO TABLE lt_lines.
+        DATA(lv_cnt) = 0.
+        LOOP AT lt_lines ASSIGNING FIELD-SYMBOL(<l2>).
+          lv_cnt += 1.
+          WRITE: / <l2>.
+          IF lv_cnt >= 10 AND lines( lt_lines ) > 10.
+            WRITE: / '...(truncated for display)...'.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+
+      IF p_save = abap_true AND p_ofile IS NOT INITIAL.
+        WRITE: / |Saved response body to: { p_ofile }|.
+      ENDIF.
+
+    CATCH cx_static_check INTO DATA(lx).
+      WRITE: / 'Error:', lx->get_text( ).
+  ENDTRY.
+
