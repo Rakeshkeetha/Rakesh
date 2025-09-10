@@ -547,111 +547,200 @@ ENDCLASS.
 
 REPORT z_http_client_demo.
 
+*----------------------------------------------------------------------
+* Pretty titles
+*----------------------------------------------------------------------
+TEXT-t01 = 'Request'.
+TEXT-t02 = 'Auth & Headers'.
+TEXT-t03 = 'Body'.
+TEXT-t04 = 'Output'.
+
+*----------------------------------------------------------------------
+* Block 1: Request
+*----------------------------------------------------------------------
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE text-t01.
 PARAMETERS: p_url  TYPE string LOWER CASE OBLIGATORY.
+
 PARAMETERS: p_get  RADIOBUTTON GROUP m1 DEFAULT 'X',
             p_post RADIOBUTTON GROUP m1,
             p_put  RADIOBUTTON GROUP m1,
             p_pat  RADIOBUTTON GROUP m1,
             p_del  RADIOBUTTON GROUP m1.
+
 PARAMETERS: p_ctyp TYPE string LOWER CASE DEFAULT 'application/json'.
 SELECTION-SCREEN END OF BLOCK b1.
 
+SELECTION-SCREEN SKIP.
+
+*----------------------------------------------------------------------
+* Block 2: Auth & Headers (responsive via MODIF IDs)
+*----------------------------------------------------------------------
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE text-t02.
-" Authorization mode
-PARAMETERS: p_auth_none  RADIOBUTTON GROUP a1 DEFAULT 'X' USER-COMMAND auth,
-            p_auth_basic RADIOBUTTON GROUP a1,
-            p_auth_mule  RADIOBUTTON GROUP a1.
 
-" Basic fields
-PARAMETERS: p_user TYPE string LOWER CASE,
-            p_pass TYPE string LOWER CASE.
+" Auth mode
+SELECTION-SCREEN COMMENT /1(30) lbl_auth FOR FIELD p_authn.
+lbl_auth = 'Authorization:';
+PARAMETERS: p_authn RADIOBUTTON GROUP a1 DEFAULT 'X' USER-COMMAND auth, " None
+            p_authb RADIOBUTTON GROUP a1,                                " Basic
+            p_authm RADIOBUTTON GROUP a1.                                " Mule
 
-" MuleSoft fields
-PARAMETERS: p_cid    TYPE string LOWER CASE,     " Client-Id
-            p_csec   TYPE string LOWER CASE,     " Client-Secret
-            p_tokurl TYPE string LOWER CASE.     " Token Endpoint URL
+" --- Basic fields (group: BSC) ---
+SELECTION-SCREEN COMMENT /3(25) lbl_bsc_usr MODIF ID BSC.
+SELECTION-SCREEN POSITION 5.
+lbl_bsc_usr = 'Username';
+PARAMETERS: p_user TYPE string LOWER CASE MODIF ID BSC.
 
-" Additional free-form headers (optional)
+SELECTION-SCREEN COMMENT /3(25) lbl_bsc_pwd MODIF ID BSC.
+SELECTION-SCREEN POSITION 5.
+lbl_bsc_pwd = 'Password';
+PARAMETERS: p_pass TYPE string LOWER CASE MODIF ID BSC.
+
+" --- MuleSoft fields (group: MLE) ---
+SELECTION-SCREEN COMMENT /3(25) lbl_mle_cid MODIF ID MLE.
+SELECTION-SCREEN POSITION 5.
+lbl_mle_cid = 'Client-Id';
+PARAMETERS: p_cid TYPE string LOWER CASE MODIF ID MLE.
+
+SELECTION-SCREEN COMMENT /3(25) lbl_mle_csc MODIF ID MLE.
+SELECTION-SCREEN POSITION 5.
+lbl_mle_csc = 'Client-Secret';
+PARAMETERS: p_csec TYPE string LOWER CASE MODIF ID MLE.
+
+SELECTION-SCREEN COMMENT /3(25) lbl_mle_url MODIF ID MLE.
+SELECTION-SCREEN POSITION 5.
+lbl_mle_url = 'Token Endpoint URL';
+PARAMETERS: p_tokurl TYPE string LOWER CASE MODIF ID MLE.
+
+" Additional free-form headers
+SELECTION-SCREEN COMMENT /1(30) lbl_hdrs FOR FIELD p_hdrs.
+lbl_hdrs = 'Extra Headers (a;b;c)';
 PARAMETERS: p_hdrs TYPE string LOWER CASE.
 SELECTION-SCREEN END OF BLOCK b2.
 
+SELECTION-SCREEN SKIP.
+
+*----------------------------------------------------------------------
+* Block 3: Body
+*----------------------------------------------------------------------
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-t03.
+SELECTION-SCREEN COMMENT /1(30) lbl_body FOR FIELD p_body.
+lbl_body = 'Inline Body (optional)';
 PARAMETERS: p_body  TYPE string LOWER CASE.
+
+SELECTION-SCREEN COMMENT /1(30) lbl_bfile FOR FIELD p_bfile.
+lbl_bfile = 'Upload Body from File (F4)';
 PARAMETERS: p_bfile TYPE rlgrap-filename LOWER CASE.
 SELECTION-SCREEN END OF BLOCK b3.
 
+SELECTION-SCREEN SKIP.
+
+*----------------------------------------------------------------------
+* Block 4: Output
+*----------------------------------------------------------------------
 SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE text-t04.
-PARAMETERS: p_save  AS CHECKBOX DEFAULT ' ',
-            p_ofile TYPE rlgrap-filename LOWER CASE.
+SELECTION-SCREEN COMMENT /1(30) lbl_save FOR FIELD p_save.
+lbl_save = 'Save Response to File';
+PARAMETERS: p_save  AS CHECKBOX DEFAULT ' '.
+
+SELECTION-SCREEN COMMENT /1(30) lbl_ofile FOR FIELD p_ofile.
+lbl_ofile = 'Output File (F4)';
+PARAMETERS: p_ofile TYPE rlgrap-filename LOWER CASE.
 SELECTION-SCREEN END OF BLOCK b4.
 
-TEXT-t01 = 'Request'.
-TEXT-t02 = 'Headers / Auth'.
-TEXT-t03 = 'Body'.
-TEXT-t04 = 'Output'.
-
-" Toggle fields by auth mode + optional validation
+*----------------------------------------------------------------------
+* Responsive UI: Show/Hide fields (not just grey-out)
+*----------------------------------------------------------------------
 AT SELECTION-SCREEN OUTPUT.
   LOOP AT SCREEN.
-    CASE screen-name.
-      WHEN 'P_USER' OR 'P_PASS'.
-        screen-active = COND i( WHEN p_auth_basic = 'X' THEN 1 ELSE 0 ).
-      WHEN 'P_CID' OR 'P_CSEC' OR 'P_TOKURL'.
-        screen-active = COND i( WHEN p_auth_mule  = 'X' THEN 1 ELSE 0 ).
+    DATA(hide) = 0.
+
+    CASE screen-group1.
+      WHEN 'BSC'. " Basic auth
+        hide = COND i( WHEN p_authb = 'X' THEN 0 ELSE 1 ).
+      WHEN 'MLE'. " Mule auth
+        hide = COND i( WHEN p_authm = 'X' THEN 0 ELSE 1 ).
+      WHEN OTHERS.
+        hide = 0.
     ENDCASE.
+
+    IF hide = 1.
+      screen-active    = 0.
+      screen-invisible = 1.
+    ELSE.
+      screen-active    = 1.
+      screen-invisible = 0.
+    ENDIF.
+
+    " Always visible: auth mode radios
+    IF screen-name = 'P_AUTHN'
+    OR screen-name = 'P_AUTHB'
+    OR screen-name = 'P_AUTHM'.
+      screen-active    = 1.
+      screen-invisible = 0.
+    ENDIF.
+
     MODIFY SCREEN.
   ENDLOOP.
 
-" (Optional) Light validation when user executes
+*----------------------------------------------------------------------
+* F4 Helps for file fields
+*----------------------------------------------------------------------
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_bfile.
+  PERFORM f4_pick_open_file CHANGING p_bfile.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_ofile.
+  PERFORM f4_pick_save_file CHANGING p_ofile.
+
+*----------------------------------------------------------------------
+* Validation for MuleSoft auth
+*----------------------------------------------------------------------
 AT SELECTION-SCREEN.
-  IF sy-ucomm = 'ONLI' AND p_auth_mule = 'X'.
+  IF sy-ucomm = 'ONLI' AND p_authm = 'X'.
     IF p_tokurl IS INITIAL OR p_cid IS INITIAL OR p_csec IS INITIAL.
       MESSAGE 'For MuleSoft auth, provide Token URL, Client-Id, and Client-Secret' TYPE 'E'.
     ENDIF.
   ENDIF.
 
+*----------------------------------------------------------------------
+* START-OF-SELECTION: Execute HTTP Client
+*----------------------------------------------------------------------
 START-OF-SELECTION.
   DATA(lo) = NEW zcl_http_client_demo( ).
   TRY.
       DATA(ls_resp) = lo->run_from_params(
-        p_url        = p_url
-        p_get        = p_get
-        p_post       = p_post
-        p_put        = p_put
-        p_pat        = p_pat
-        p_del        = p_del
-        p_ctyp       = p_ctyp
-        p_hdrs       = p_hdrs
+        p_url    = p_url
+        p_get    = p_get
+        p_post   = p_post
+        p_put    = p_put
+        p_pat    = p_pat
+        p_del    = p_del
+        p_ctyp   = p_ctyp
+        p_hdrs   = p_hdrs
 
-        p_auth_none  = p_auth_none
-        p_auth_basic = p_auth_basic
-        p_auth_mule  = p_auth_mule
+        p_auth_none  = p_authn
+        p_auth_basic = p_authb
+        p_auth_mule  = p_authm
 
-        p_user       = p_user
-        p_pass       = p_pass
+        p_user   = p_user
+        p_pass   = p_pass
+        p_cid    = p_cid
+        p_csec   = p_csec
+        p_tokurl = p_tokurl
 
-        p_cid        = p_cid
-        p_csec       = p_csec
-        p_tokurl     = p_tokurl
-
-        p_body       = p_body
-        p_bfile      = p_bfile
-        p_save       = p_save
-        p_ofile      = p_ofile
+        p_body   = p_body
+        p_bfile  = p_bfile
+        p_save   = p_save
+        p_ofile  = p_ofile
       ).
 
-      " Print status
       WRITE: / 'Status:', ls_resp-status_code, ls_resp-status_text.
 
-      " Headers
       ULINE.
       WRITE: / 'Response Headers:'.
       LOOP AT ls_resp-headers ASSIGNING FIELD-SYMBOL(<h>).
         WRITE: / <h>-name, ': ', <h>-value.
       ENDLOOP.
 
-      " Body (first ~10 lines)
       ULINE.
       WRITE: / 'Response Body:'.
       IF ls_resp-body IS INITIAL.
@@ -677,3 +766,48 @@ START-OF-SELECTION.
     CATCH cx_static_check INTO DATA(lx).
       WRITE: / 'Error:', lx->get_text( ).
   ENDTRY.
+
+*----------------------------------------------------------------------
+* F O R M S
+*----------------------------------------------------------------------
+FORM f4_pick_open_file CHANGING cv_filename TYPE rlgrap-filename.
+  DATA: lt_filetab TYPE filetable,
+        lv_rc      TYPE i,
+        lv_full    TYPE string.
+
+  CALL METHOD cl_gui_frontend_services=>file_open_dialog
+    EXPORTING
+      file_filter    = 'All Files (*.*)|*.*|Text Files (*.txt)|*.txt|JSON (*.json)|*.json'
+      multiselection = abap_false
+    CHANGING
+      file_table     = lt_filetab
+      rc             = lv_rc
+    EXCEPTIONS
+      OTHERS         = 1.
+
+  IF sy-subrc = 0 AND lv_rc > 0.
+    READ TABLE lt_filetab INDEX 1 INTO DATA(ls_file).
+    IF sy-subrc = 0.
+      cv_filename = ls_file-filename.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+FORM f4_pick_save_file CHANGING cv_filename TYPE rlgrap-filename.
+  DATA: lv_full TYPE string.
+
+  CALL METHOD cl_gui_frontend_services=>file_save_dialog
+    EXPORTING
+      default_extension   = 'txt'
+      file_filter         = 'All Files (*.*)|*.*|Text Files (*.txt)|*.txt|JSON (*.json)|*.json'
+      prompt_on_overwrite = abap_true
+    CHANGING
+      fullpath            = lv_full
+    EXCEPTIONS
+      OTHERS              = 1.
+
+  IF sy-subrc = 0 AND lv_full IS NOT INITIAL.
+    cv_filename = lv_full.
+  ENDIF.
+ENDFORM.
+
