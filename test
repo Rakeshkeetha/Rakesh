@@ -21,9 +21,15 @@ CLASS zcl_http_client_demo DEFINITION
              headers_tab   TYPE ty_string_tab,     " optional pre-split 'Key: Value' lines
              body_inline   TYPE string,            " optional inline body
              body_file     TYPE rlgrap-filename,   " optional file path (overrides inline if provided)
-             basic_auth_on TYPE abap_bool,         " add Authorization: Basic ... if true and not already present
+
+             " Auth
+             auth_mode     TYPE string,            " 'NONE' | 'BASIC' | 'MULE'
              basic_user    TYPE string,
              basic_pass    TYPE string,
+             client_id     TYPE string,
+             client_secret TYPE string,
+             token_url     TYPE string,            " Token endpoint URL (for MULE)
+
              save_to_file  TYPE abap_bool,
              out_file      TYPE rlgrap-filename,
            END OF ty_request.
@@ -44,24 +50,33 @@ CLASS zcl_http_client_demo DEFINITION
       RAISING
         cx_static_check.
 
-    " Convenience: mirrors your report parameters
+    " Convenience: mirrors selection parameters
     METHODS run_from_params
       IMPORTING
-        p_url      TYPE string
-        p_get      TYPE abap_bool
-        p_post     TYPE abap_bool
-        p_put      TYPE abap_bool
-        p_pat      TYPE abap_bool
-        p_del      TYPE abap_bool
-        p_ctyp     TYPE string
-        p_hdrs     TYPE string
-        p_bauth    TYPE abap_bool
-        p_user     TYPE string
-        p_pass     TYPE string
-        p_body     TYPE string
-        p_bfile    TYPE rlgrap-filename
-        p_save     TYPE abap_bool
-        p_ofile    TYPE rlgrap-filename
+        p_url        TYPE string
+        p_get        TYPE abap_bool
+        p_post       TYPE abap_bool
+        p_put        TYPE abap_bool
+        p_pat        TYPE abap_bool
+        p_del        TYPE abap_bool
+        p_ctyp       TYPE string
+        p_hdrs       TYPE string
+
+        p_auth_none  TYPE abap_bool
+        p_auth_basic TYPE abap_bool
+        p_auth_mule  TYPE abap_bool
+
+        p_user       TYPE string
+        p_pass       TYPE string
+
+        p_cid        TYPE string
+        p_csec       TYPE string
+        p_tokurl     TYPE string
+
+        p_body       TYPE string
+        p_bfile      TYPE rlgrap-filename
+        p_save       TYPE abap_bool
+        p_ofile      TYPE rlgrap-filename
       RETURNING
         VALUE(r_response) TYPE ty_response
       RAISING
@@ -78,6 +93,13 @@ CLASS zcl_http_client_demo DEFINITION
         p_del  TYPE abap_bool
       RETURNING VALUE(r_method) TYPE string.
 
+    METHODS determine_auth_mode
+      IMPORTING
+        p_none  TYPE abap_bool
+        p_basic TYPE abap_bool
+        p_mule  TYPE abap_bool
+      RETURNING VALUE(r_mode) TYPE string. " 'NONE'|'BASIC'|'MULE'
+
     METHODS parse_headers_text
       IMPORTING
         i_hdrs_text TYPE string
@@ -86,7 +108,6 @@ CLASS zcl_http_client_demo DEFINITION
 
     METHODS maybe_build_basic_auth
       IMPORTING
-        i_on       TYPE abap_bool
         i_user     TYPE string
         i_pass     TYPE string
       CHANGING
@@ -121,13 +142,25 @@ CLASS zcl_http_client_demo DEFINITION
         e_resp_body    TYPE string
       RAISING
         cx_static_check.
+
+    METHODS get_mulesoft_token
+      IMPORTING
+        i_token_url     TYPE string
+        i_client_id     TYPE string
+        i_client_secret TYPE string
+      RETURNING
+        VALUE(r_token)  TYPE string
+      RAISING
+        cx_static_check.
+
+    METHODS parse_token_from_response
+      IMPORTING
+        i_status    TYPE i
+        it_headers  TYPE ty_header_tab
+        i_body      TYPE string
+      RETURNING
+        VALUE(r_tok) TYPE string.
 ENDCLASS.
-
-
-
-
-
-
 
 
 
@@ -137,9 +170,19 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
     IF     p_get = abap_true.  r_method = if_http_request=>co_request_method_get.     RETURN. ENDIF.
     IF    p_post = abap_true.  r_method = if_http_request=>co_request_method_post.    RETURN. ENDIF.
     IF     p_put = abap_true.  r_method = if_http_request=>co_request_method_put.     RETURN. ENDIF.
-    IF     p_pat = abap_true.  r_method = 'PATCH'.                                    RETURN. ENDIF. " older releases
+    IF     p_pat = abap_true.  r_method = 'PATCH'.                                    RETURN. ENDIF.
     IF     p_del = abap_true.  r_method = if_http_request=>co_request_method_delete.  RETURN. ENDIF.
     r_method = if_http_request=>co_request_method_get. " default
+  ENDMETHOD.
+
+  METHOD determine_auth_mode.
+    IF p_basic = abap_true.
+      r_mode = 'BASIC'.
+    ELSEIF p_mule = abap_true.
+      r_mode = 'MULE'.
+    ELSE.
+      r_mode = 'NONE'.
+    ENDIF.
   ENDMETHOD.
 
   METHOD parse_headers_text.
@@ -157,10 +200,11 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD maybe_build_basic_auth.
-    IF i_on <> abap_true OR i_user IS INITIAL.
+    IF i_user IS INITIAL.
       RETURN.
     ENDIF.
 
+    " Avoid duplicate Authorization header if user already provided one
     DATA(lv_has_auth) = abap_false.
     LOOP AT ct_hdrs ASSIGNING FIELD-SYMBOL(<h>).
       IF <h> CP 'Authorization:*' OR <h> CP 'authorization:*'.
@@ -182,7 +226,6 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
   METHOD read_body_from_file.
     DATA lt_bin TYPE solix_tab.
     DATA lv_xstr TYPE xstring.
-
     TRY.
         cl_gui_frontend_services=>gui_upload(
           EXPORTING filename = i_filename
@@ -195,12 +238,11 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
           IMPORTING buffer       = lv_xstr
           TABLES    binary_tab   = lt_bin.
 
-        " Assume UTF-8; adjust if you know the file encoding
         DATA(lo_in) = cl_abap_conv_in_ce=>create( input = lv_xstr encoding = 'UTF-8' ).
         lo_in->read( IMPORTING data = r_body ).
       CATCH cx_root INTO DATA(lx).
         RAISE EXCEPTION TYPE cx_static_check
-          EXPORTING textid = cx_static_check=>others
+          EXPORTING textid  = cx_static_check=>others
                     previous = lx.
     ENDTRY.
   ENDMETHOD.
@@ -208,7 +250,6 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
   METHOD save_to_file.
     DATA lv_xstr TYPE xstring.
     DATA lt_bin  TYPE solix_tab.
-
     TRY.
         DATA(lo_out) = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
         lo_out->write( data = i_content ).
@@ -225,7 +266,7 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
         ).
       CATCH cx_root INTO DATA(lx).
         RAISE EXCEPTION TYPE cx_static_check
-          EXPORTING textid = cx_static_check=>others
+          EXPORTING textid  = cx_static_check=>others
                     previous = lx.
     ENDTRY.
   ENDMETHOD.
@@ -233,7 +274,6 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
   METHOD call_service.
     DATA lo_client TYPE REF TO if_http_client.
 
-    " Create client
     TRY.
         cl_http_client=>create_by_url(
           EXPORTING url    = i_url
@@ -245,7 +285,6 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
                     previous = lx1.
     ENDTRY.
 
-    " Method
     lo_client->request->set_method( i_method ).
 
     " Apply headers and detect Content-Type
@@ -261,10 +300,7 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
         SHIFT lv_name  RIGHT DELETING TRAILING space.
         TRANSLATE lv_name TO UPPER CASE.
 
-        lo_client->request->set_header_field(
-          name  = lv_name
-          value = lv_value
-        ).
+        lo_client->request->set_header_field( name  = lv_name value = lv_value ).
 
         IF lv_name = 'CONTENT-TYPE'.
           lv_content_set = abap_true.
@@ -279,12 +315,10 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
       ).
     ENDIF.
 
-    " Body
     IF i_body IS NOT INITIAL.
       lo_client->request->set_cdata( i_body ).
     ENDIF.
 
-    " Send & receive
     TRY.
         lo_client->send( ).
         lo_client->receive( ).
@@ -295,13 +329,11 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
                     previous = lx2.
     ENDTRY.
 
-    " Status
     lo_client->response->get_status(
       IMPORTING code   = e_status_code
                 reason = e_status_text
     ).
 
-    " Headers
     DATA lt_nvp TYPE tihttpnvp.
     lt_nvp = lo_client->response->get_header_fields( ).
     CLEAR et_resp_hdrs.
@@ -309,10 +341,85 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
       APPEND VALUE ty_header( name = <nvp>-name value = <nvp>-value ) TO et_resp_hdrs.
     ENDLOOP.
 
-    " Body
     e_resp_body = lo_client->response->get_cdata( ).
 
     lo_client->close( ).
+  ENDMETHOD.
+
+  METHOD parse_token_from_response.
+    DATA(lv) = ``.
+
+    " 1) Try headers: Token / X-Token / Access_Token / Authorization
+    LOOP AT it_headers ASSIGNING FIELD-SYMBOL(<h>).
+      DATA(upper) = <h>-name.
+      TRANSLATE upper TO UPPER CASE.
+      IF upper = 'TOKEN' OR upper = 'X-TOKEN' OR upper = 'ACCESS_TOKEN' OR upper = 'AUTHORIZATION'.
+        lv = <h>-value.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    " If header contains 'Bearer ...' strip prefix
+    IF lv CP 'Bearer *'.
+      SHIFT lv BY 7 PLACES.
+      SHIFT lv LEFT DELETING LEADING space.
+    ENDIF.
+
+    " 2) Try JSON body: access_token / token
+    IF lv IS INITIAL AND i_body IS NOT INITIAL.
+      " Try regex first (safe if /UI2/CL_JSON not available)
+      FIND REGEX '"access_token"\s*:\s*"([^"]+)"' IN i_body SUBMATCHES lv.
+      IF lv IS INITIAL.
+        FIND REGEX '"token"\s*:\s*"([^"]+)"' IN i_body SUBMATCHES lv.
+      ENDIF.
+    ENDIF.
+
+    r_tok = lv.
+  ENDMETHOD.
+
+  METHOD get_mulesoft_token.
+    IF i_token_url IS INITIAL.
+      RAISE EXCEPTION TYPE cx_static_check
+        EXPORTING textid = cx_static_check=>others
+                  previous = NEW cx_root( textid = cx_root=>others ).
+    ENDIF.
+
+    DATA lt_hdr TYPE ty_string_tab.
+    APPEND |client-Id: { i_client_id }|         TO lt_hdr.
+    APPEND |client-Secret: { i_client_secret }| TO lt_hdr.
+    APPEND |Content-Type: application/x-www-form-urlencoded| TO lt_hdr.
+
+    DATA: lv_code TYPE i,
+          lv_text TYPE string,
+          lt_rhdr TYPE ty_header_tab,
+          lv_body TYPE string.
+
+    call_service(
+      EXPORTING
+        i_url          = i_token_url
+        i_method       = if_http_request=>co_request_method_post
+        it_request_hdr = lt_hdr
+        i_content_type = 'application/x-www-form-urlencoded'
+        i_body         = ''          " Add form body here if your gateway requires it
+      IMPORTING
+        e_status_code  = lv_code
+        e_status_text  = lv_text
+        et_resp_hdrs   = lt_rhdr
+        e_resp_body    = lv_body
+    ).
+
+    DATA(lv_tok) = parse_token_from_response(
+                     i_status   = lv_code
+                     it_headers = lt_rhdr
+                     i_body     = lv_body ).
+
+    IF lv_tok IS INITIAL.
+      RAISE EXCEPTION TYPE cx_static_check
+        EXPORTING textid = cx_static_check=>others
+                  previous = NEW cx_root( textid = cx_root=>others ).
+    ENDIF.
+
+    r_token = lv_tok.
   ENDMETHOD.
 
   METHOD execute.
@@ -331,21 +438,39 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
       APPEND LINES OF i_request-headers_tab TO lt_hdr_lines.
     ENDIF.
 
-    " Optional Basic Auth
-    maybe_build_basic_auth(
-      EXPORTING i_on   = i_request-basic_auth_on
-                i_user = i_request-basic_user
-                i_pass = i_request-basic_pass
-      CHANGING  ct_hdrs = lt_hdr_lines
-    ).
-
     " Determine body (file overrides inline)
     lv_body = i_request-body_inline.
     IF i_request-body_file IS NOT INITIAL.
       lv_body = read_body_from_file( i_request-body_file ).
     ENDIF.
 
-    " Call
+    " --- Auth handling ---
+    DATA lt_request_hdr TYPE ty_string_tab.
+    lt_request_hdr = lt_hdr_lines.
+
+    CASE i_request-auth_mode.
+      WHEN 'BASIC'.
+        maybe_build_basic_auth(
+          EXPORTING i_user  = i_request-basic_user
+                    i_pass  = i_request-basic_pass
+          CHANGING  ct_hdrs = lt_request_hdr
+        ).
+
+      WHEN 'MULE'.
+        " 1) Get token from provided token endpoint
+        DATA(lv_token) = get_mulesoft_token(
+                           i_token_url     = i_request-token_url
+                           i_client_id     = i_request-client_id
+                           i_client_secret = i_request-client_secret ).
+
+        " 2) Add Bearer token for the actual call
+        APPEND |Authorization: Bearer { lv_token }| TO lt_request_hdr.
+
+      WHEN OTHERS. " NONE
+        " nothing
+    ENDCASE.
+
+    " --- Call target URL ---
     DATA: lv_code TYPE i,
           lv_text TYPE string,
           lt_rhdr TYPE ty_header_tab,
@@ -355,7 +480,7 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
       EXPORTING
         i_url          = i_request-url
         i_method       = i_request-method
-        it_request_hdr = lt_hdr_lines
+        it_request_hdr = lt_request_hdr
         i_content_type = i_request-content_type
         i_body         = lv_body
       IMPORTING
@@ -365,7 +490,6 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
         e_resp_body    = lv_rbd
     ).
 
-    " Optional save
     IF i_request-save_to_file = abap_true AND i_request-out_file IS NOT INITIAL.
       save_to_file(
         i_filename = i_request-out_file
@@ -390,284 +514,10 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
       p_del  = p_del
     ).
 
-    DATA(ls_req) = VALUE ty_request(
-      url           = p_url
-      method        = lv_method
-      content_type  = p_ctyp
-      headers_text  = p_hdrs
-      body_inline   = p_body
-      body_file     = p_bfile
-      basic_auth_on = p_bauth
-      basic_user    = p_user
-      basic_pass    = p_pass
-      save_to_file  = p_save
-      out_file      = p_ofile
-    ).
-
-    r_response = execute( ls_req ).
-  ENDMETHOD.
-
-ENDCLASS.
-
-
-
-CLASS zcl_http_client_demo IMPLEMENTATION.
-
-  METHOD determine_method.
-    IF     p_get = abap_true.  r_method = if_http_request=>co_request_method_get.     RETURN. ENDIF.
-    IF    p_post = abap_true.  r_method = if_http_request=>co_request_method_post.    RETURN. ENDIF.
-    IF     p_put = abap_true.  r_method = if_http_request=>co_request_method_put.     RETURN. ENDIF.
-    IF     p_pat = abap_true.  r_method = 'PATCH'.                                    RETURN. ENDIF. " older releases
-    IF     p_del = abap_true.  r_method = if_http_request=>co_request_method_delete.  RETURN. ENDIF.
-    r_method = if_http_request=>co_request_method_get. " default
-  ENDMETHOD.
-
-  METHOD parse_headers_text.
-    DATA lt_split TYPE ty_string_tab.
-    SPLIT i_hdrs_text AT ';' INTO TABLE lt_split.
-    LOOP AT lt_split ASSIGNING FIELD-SYMBOL(<l>).
-      DATA(l) = |{ <l> ALPHA = OFF }|.
-      CONDENSE l NO-GAPS.
-      REPLACE ALL OCCURRENCES OF ':' IN l WITH ': '.
-      REPLACE ALL OCCURRENCES OF ':  ' IN l WITH ': '.
-      IF l IS NOT INITIAL.
-        APPEND l TO ct_hdrs.
-      ENDIF.
-    ENDLOOP.
-  ENDMETHOD.
-
-  METHOD maybe_build_basic_auth.
-    IF i_on <> abap_true OR i_user IS INITIAL.
-      RETURN.
-    ENDIF.
-
-    DATA(lv_has_auth) = abap_false.
-    LOOP AT ct_hdrs ASSIGNING FIELD-SYMBOL(<h>).
-      IF <h> CP 'Authorization:*' OR <h> CP 'authorization:*'.
-        lv_has_auth = abap_true.
-        EXIT.
-      ENDIF.
-    ENDLOOP.
-
-    IF lv_has_auth = abap_false.
-      DATA(lv_cred)   = |{ i_user }:{ i_pass }|.
-      DATA(lv_base64) TYPE string.
-      CALL FUNCTION 'SCMS_BASE64_ENCODE_STR'
-        EXPORTING input  = lv_cred
-        IMPORTING output = lv_base64.
-      APPEND |Authorization: Basic { lv_base64 }| TO ct_hdrs.
-    ENDIF.
-  ENDMETHOD.
-
-  METHOD read_body_from_file.
-    DATA lt_bin TYPE solix_tab.
-    DATA lv_xstr TYPE xstring.
-
-    TRY.
-        cl_gui_frontend_services=>gui_upload(
-          EXPORTING filename = i_filename
-                    filetype = 'BIN'
-          CHANGING  data_tab = lt_bin
-        ).
-
-        CALL FUNCTION 'SCMS_BINARY_TO_XSTRING'
-          EXPORTING input_length = lines( lt_bin ) * 255
-          IMPORTING buffer       = lv_xstr
-          TABLES    binary_tab   = lt_bin.
-
-        " Assume UTF-8; adjust if you know the file encoding
-        DATA(lo_in) = cl_abap_conv_in_ce=>create( input = lv_xstr encoding = 'UTF-8' ).
-        lo_in->read( IMPORTING data = r_body ).
-      CATCH cx_root INTO DATA(lx).
-        RAISE EXCEPTION TYPE cx_static_check
-          EXPORTING textid = cx_static_check=>others
-                    previous = lx.
-    ENDTRY.
-  ENDMETHOD.
-
-  METHOD save_to_file.
-    DATA lv_xstr TYPE xstring.
-    DATA lt_bin  TYPE solix_tab.
-
-    TRY.
-        DATA(lo_out) = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
-        lo_out->write( data = i_content ).
-        lv_xstr = lo_out->get_buffer( ).
-
-        CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
-          EXPORTING buffer     = lv_xstr
-          TABLES    binary_tab = lt_bin.
-
-        cl_gui_frontend_services=>gui_download(
-          EXPORTING filename = i_filename
-                    filetype = 'BIN'
-          CHANGING  data_tab = lt_bin
-        ).
-      CATCH cx_root INTO DATA(lx).
-        RAISE EXCEPTION TYPE cx_static_check
-          EXPORTING textid = cx_static_check=>others
-                    previous = lx.
-    ENDTRY.
-  ENDMETHOD.
-
-  METHOD call_service.
-    DATA lo_client TYPE REF TO if_http_client.
-
-    " Create client
-    TRY.
-        cl_http_client=>create_by_url(
-          EXPORTING url    = i_url
-          IMPORTING client = lo_client
-        ).
-      CATCH cx_root INTO DATA(lx1).
-        RAISE EXCEPTION TYPE cx_static_check
-          EXPORTING textid  = cx_static_check=>others
-                    previous = lx1.
-    ENDTRY.
-
-    " Method
-    lo_client->request->set_method( i_method ).
-
-    " Apply headers and detect Content-Type
-    DATA(lv_content_set) = abap_false.
-    LOOP AT it_request_hdr ASSIGNING FIELD-SYMBOL(<hline>).
-      DATA(lv_name)  = <hline>.
-      DATA(lv_value) = ``.
-      FIND FIRST OCCURRENCE OF ':' IN lv_name MATCH OFFSET DATA(lv_idx).
-      IF sy-subrc = 0.
-        lv_value = lv_name+lv_idx+1.
-        lv_name  = lv_name( lv_idx ).
-        SHIFT lv_value LEFT  DELETING LEADING space.
-        SHIFT lv_name  RIGHT DELETING TRAILING space.
-        TRANSLATE lv_name TO UPPER CASE.
-
-        lo_client->request->set_header_field(
-          name  = lv_name
-          value = lv_value
-        ).
-
-        IF lv_name = 'CONTENT-TYPE'.
-          lv_content_set = abap_true.
-        ENDIF.
-      ENDIF.
-    ENDLOOP.
-
-    IF lv_content_set = abap_false AND i_content_type IS NOT INITIAL.
-      lo_client->request->set_header_field(
-        name  = 'Content-Type'
-        value = i_content_type
-      ).
-    ENDIF.
-
-    " Body
-    IF i_body IS NOT INITIAL.
-      lo_client->request->set_cdata( i_body ).
-    ENDIF.
-
-    " Send & receive
-    TRY.
-        lo_client->send( ).
-        lo_client->receive( ).
-      CATCH cx_root INTO DATA(lx2).
-        lo_client->close( ).
-        RAISE EXCEPTION TYPE cx_static_check
-          EXPORTING textid  = cx_static_check=>others
-                    previous = lx2.
-    ENDTRY.
-
-    " Status
-    lo_client->response->get_status(
-      IMPORTING code   = e_status_code
-                reason = e_status_text
-    ).
-
-    " Headers
-    DATA lt_nvp TYPE tihttpnvp.
-    lt_nvp = lo_client->response->get_header_fields( ).
-    CLEAR et_resp_hdrs.
-    LOOP AT lt_nvp ASSIGNING FIELD-SYMBOL(<nvp>).
-      APPEND VALUE ty_header( name = <nvp>-name value = <nvp>-value ) TO et_resp_hdrs.
-    ENDLOOP.
-
-    " Body
-    e_resp_body = lo_client->response->get_cdata( ).
-
-    lo_client->close( ).
-  ENDMETHOD.
-
-  METHOD execute.
-    DATA: lt_hdr_lines TYPE ty_string_tab,
-          lv_body      TYPE string.
-
-    " Collect headers (from text and/or provided table)
-    IF i_request-headers_text IS NOT INITIAL.
-      parse_headers_text(
-        EXPORTING i_hdrs_text = i_request-headers_text
-        CHANGING  ct_hdrs     = lt_hdr_lines
-      ).
-    ENDIF.
-
-    IF i_request-headers_tab IS NOT INITIAL.
-      APPEND LINES OF i_request-headers_tab TO lt_hdr_lines.
-    ENDIF.
-
-    " Optional Basic Auth
-    maybe_build_basic_auth(
-      EXPORTING i_on   = i_request-basic_auth_on
-                i_user = i_request-basic_user
-                i_pass = i_request-basic_pass
-      CHANGING  ct_hdrs = lt_hdr_lines
-    ).
-
-    " Determine body (file overrides inline)
-    lv_body = i_request-body_inline.
-    IF i_request-body_file IS NOT INITIAL.
-      lv_body = read_body_from_file( i_request-body_file ).
-    ENDIF.
-
-    " Call
-    DATA: lv_code TYPE i,
-          lv_text TYPE string,
-          lt_rhdr TYPE ty_header_tab,
-          lv_rbd  TYPE string.
-
-    call_service(
-      EXPORTING
-        i_url          = i_request-url
-        i_method       = i_request-method
-        it_request_hdr = lt_hdr_lines
-        i_content_type = i_request-content_type
-        i_body         = lv_body
-      IMPORTING
-        e_status_code  = lv_code
-        e_status_text  = lv_text
-        et_resp_hdrs   = lt_rhdr
-        e_resp_body    = lv_rbd
-    ).
-
-    " Optional save
-    IF i_request-save_to_file = abap_true AND i_request-out_file IS NOT INITIAL.
-      save_to_file(
-        i_filename = i_request-out_file
-        i_content  = lv_rbd
-      ).
-    ENDIF.
-
-    r_response = VALUE ty_response(
-      status_code = lv_code
-      status_text = lv_text
-      headers     = lt_rhdr
-      body        = lv_rbd
-    ).
-  ENDMETHOD.
-
-  METHOD run_from_params.
-    DATA(lv_method) = determine_method(
-      p_get  = p_get
-      p_post = p_post
-      p_put  = p_put
-      p_pat  = p_pat
-      p_del  = p_del
+    DATA(lv_auth) = determine_auth_mode(
+      p_none  = p_auth_none
+      p_basic = p_auth_basic
+      p_mule  = p_auth_mule
     ).
 
     DATA(ls_req) = VALUE ty_request(
@@ -677,9 +527,14 @@ CLASS zcl_http_client_demo IMPLEMENTATION.
       headers_text  = p_hdrs
       body_inline   = p_body
       body_file     = p_bfile
-      basic_auth_on = p_bauth
+
+      auth_mode     = lv_auth
       basic_user    = p_user
       basic_pass    = p_pass
+      client_id     = p_cid
+      client_secret = p_csec
+      token_url     = p_tokurl
+
       save_to_file  = p_save
       out_file      = p_ofile
     ).
@@ -703,10 +558,22 @@ PARAMETERS: p_ctyp TYPE string LOWER CASE DEFAULT 'application/json'.
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE text-t02.
-PARAMETERS: p_hdrs TYPE string LOWER CASE.
-PARAMETERS: p_bauth AS CHECKBOX DEFAULT ' '.
+" Authorization mode
+PARAMETERS: p_auth_none  RADIOBUTTON GROUP a1 DEFAULT 'X' USER-COMMAND auth,
+            p_auth_basic RADIOBUTTON GROUP a1,
+            p_auth_mule  RADIOBUTTON GROUP a1.
+
+" Basic fields
 PARAMETERS: p_user TYPE string LOWER CASE,
             p_pass TYPE string LOWER CASE.
+
+" MuleSoft fields
+PARAMETERS: p_cid    TYPE string LOWER CASE,     " Client-Id
+            p_csec   TYPE string LOWER CASE,     " Client-Secret
+            p_tokurl TYPE string LOWER CASE.     " Token Endpoint URL
+
+" Additional free-form headers (optional)
+PARAMETERS: p_hdrs TYPE string LOWER CASE.
 SELECTION-SCREEN END OF BLOCK b2.
 
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-t03.
@@ -715,7 +582,7 @@ PARAMETERS: p_bfile TYPE rlgrap-filename LOWER CASE.
 SELECTION-SCREEN END OF BLOCK b3.
 
 SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE text-t04.
-PARAMETERS: p_save AS CHECKBOX DEFAULT ' ',
+PARAMETERS: p_save  AS CHECKBOX DEFAULT ' ',
             p_ofile TYPE rlgrap-filename LOWER CASE.
 SELECTION-SCREEN END OF BLOCK b4.
 
@@ -724,25 +591,54 @@ TEXT-t02 = 'Headers / Auth'.
 TEXT-t03 = 'Body'.
 TEXT-t04 = 'Output'.
 
+" Toggle fields by auth mode + optional validation
+AT SELECTION-SCREEN OUTPUT.
+  LOOP AT SCREEN.
+    CASE screen-name.
+      WHEN 'P_USER' OR 'P_PASS'.
+        screen-active = COND i( WHEN p_auth_basic = 'X' THEN 1 ELSE 0 ).
+      WHEN 'P_CID' OR 'P_CSEC' OR 'P_TOKURL'.
+        screen-active = COND i( WHEN p_auth_mule  = 'X' THEN 1 ELSE 0 ).
+    ENDCASE.
+    MODIFY SCREEN.
+  ENDLOOP.
+
+" (Optional) Light validation when user executes
+AT SELECTION-SCREEN.
+  IF sy-ucomm = 'ONLI' AND p_auth_mule = 'X'.
+    IF p_tokurl IS INITIAL OR p_cid IS INITIAL OR p_csec IS INITIAL.
+      MESSAGE 'For MuleSoft auth, provide Token URL, Client-Id, and Client-Secret' TYPE 'E'.
+    ENDIF.
+  ENDIF.
+
 START-OF-SELECTION.
   DATA(lo) = NEW zcl_http_client_demo( ).
   TRY.
       DATA(ls_resp) = lo->run_from_params(
-        p_url   = p_url
-        p_get   = p_get
-        p_post  = p_post
-        p_put   = p_put
-        p_pat   = p_pat
-        p_del   = p_del
-        p_ctyp  = p_ctyp
-        p_hdrs  = p_hdrs
-        p_bauth = p_bauth
-        p_user  = p_user
-        p_pass  = p_pass
-        p_body  = p_body
-        p_bfile = p_bfile
-        p_save  = p_save
-        p_ofile = p_ofile
+        p_url        = p_url
+        p_get        = p_get
+        p_post       = p_post
+        p_put        = p_put
+        p_pat        = p_pat
+        p_del        = p_del
+        p_ctyp       = p_ctyp
+        p_hdrs       = p_hdrs
+
+        p_auth_none  = p_auth_none
+        p_auth_basic = p_auth_basic
+        p_auth_mule  = p_auth_mule
+
+        p_user       = p_user
+        p_pass       = p_pass
+
+        p_cid        = p_cid
+        p_csec       = p_csec
+        p_tokurl     = p_tokurl
+
+        p_body       = p_body
+        p_bfile      = p_bfile
+        p_save       = p_save
+        p_ofile      = p_ofile
       ).
 
       " Print status
@@ -781,4 +677,3 @@ START-OF-SELECTION.
     CATCH cx_static_check INTO DATA(lx).
       WRITE: / 'Error:', lx->get_text( ).
   ENDTRY.
-
